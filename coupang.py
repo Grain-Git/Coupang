@@ -19,9 +19,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-COUPANG_ACCESS_KEY = os.getenv("c6d06a43-a425-4108-a309-cbd9a00f2c41")
-COUPANG_SECRET_KEY = os.getenv("8f38a99d30b1b73bed7cd67b1d658819367ecd6a")
-COUPANG_VENDOR_ID = os.getenv("A01231033")
+COUPANG_ACCESS_KEY = os.getenv("COUPANG_ACCESS_KEY")
+COUPANG_SECRET_KEY = os.getenv("COUPANG_SECRET_KEY")
+COUPANG_VENDOR_ID = os.getenv("COUPANG_VENDOR_ID")
 
 DOMAIN = "https://api-gateway.coupang.com"
 
