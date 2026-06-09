@@ -25,8 +25,21 @@ COUPANG_VENDOR_ID = os.getenv("COUPANG_VENDOR_ID")
 
 DOMAIN = "https://api-gateway.coupang.com"
 
+@app.get("/")
+def home():
+    return {"status": "JRAIN Coupang API is running"}
+
+@app.get("/health")
+def health():
+    return {
+        "access_key": bool(COUPANG_ACCESS_KEY),
+        "secret_key": bool(COUPANG_SECRET_KEY),
+        "vendor_id": COUPANG_VENDOR_ID
+    }
 
 def make_auth(method, path, query=""):
+    if not COUPANG_ACCESS_KEY or not COUPANG_SECRET_KEY or not COUPANG_VENDOR_ID:
+        raise Exception("쿠팡 환경변수가 설정되지 않았습니다.")
     datetime = time.strftime("%y%m%dT%H%M%SZ", time.gmtime())
     message = datetime + method + path + query
 
