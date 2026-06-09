@@ -60,39 +60,45 @@ def make_auth(method, path, query=""):
 
 @app.get("/api/coupang/products")
 def get_products():
+    method = "GET"
+    path = "/v2/providers/seller_api/apis/api/v1/marketplace/seller-products"
+    query = f"vendorId={COUPANG_VENDOR_ID}&nextToken=&maxPerPage=100"
 
-    method="GET"
+    url = f"{DOMAIN}{path}?{query}"
 
-    path="/v2/providers/seller_api/apis/api/v1/marketplace/seller-products"
-
-    query=f"vendorId={COUPANG_VENDOR_ID}&nextToken=&maxPerPage=100"
-
-    url=f"{DOMAIN}{path}?{query}"
-
-    headers={
-        "Authorization":make_auth(method,path,query),
-        "Content-Type":"application/json;charset=UTF-8"
+    headers = {
+        "Authorization": make_auth(method, path, query),
+        "Content-Type": "application/json;charset=UTF-8"
     }
 
-    res=requests.get(url,headers=headers)
+    res = requests.get(url, headers=headers)
 
-    result=res.json()
+    try:
+        result = res.json()
+    except Exception:
+        return {
+            "error": "쿠팡 응답을 JSON으로 변환 실패",
+            "status_code": res.status_code,
+            "text": res.text
+        }
 
-    products=[]
+    if result.get("code") != "SUCCESS":
+        return {
+            "error": "쿠팡 API 실패",
+            "status_code": res.status_code,
+            "result": result
+        }
 
-    if result.get("code")=="SUCCESS":
+    raw_data = result.get("data", [])
 
-        for p in result["data"]:
+    products = []
 
-            products.append({
-
-                "id":p["sellerProductId"],
-
-                "name":p["sellerProductName"],
-
-                "status":p["statusName"]
-
-            })
+    for p in raw_data:
+        products.append({
+            "id": p.get("sellerProductId"),
+            "name": p.get("sellerProductName"),
+            "status": p.get("statusName")
+        })
 
     return products
 
