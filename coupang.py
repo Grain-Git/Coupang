@@ -7,6 +7,7 @@ load_dotenv()
 from fastapi import Query
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
+from datetime import datetime, timedelta, timezone
 import urllib.parse
 
 from datetime import datetime, timedelta, timezone
@@ -440,4 +441,134 @@ def get_coupang_sales_summary():
         "monthStart": month_start,
         "today": summarize_orders(today_result["orders"]),
         "month": summarize_orders(month_result["orders"])
+    }
+
+def get_kst_range():
+    kst = timezone(timedelta(hours=9))
+    now = datetime.now(kst)
+
+    today = now.strftime("%Y%m%d")
+    month_start = now.replace(day=1).strftime("%Y%m%d")
+
+    return today, month_start
+
+
+def fetch_rg_orders(paid_date_from: str, paid_date_to: str):
+    method = "GET"
+    path = f"/v2/providers/rg_open_api/apis/api/v1/vendors/{COUPANG_VENDOR_ID}/rg/orders"
+
+    all_orders = []
+    next_token = ""
+
+    while True:
+        query = f"paidDateFrom={paid_date_from}&paidDateTo={paid_date_to}"
+
+        if next_token:
+            query += f"&nextToken={next_token}"
+
+        url = f"{DOMAIN}{path}?{query}"
+
+        headers = {
+            "Authorization": make_auth(method, path, query),
+            "Content-Type": "application/json;charset=UTF-8"
+        }
+
+        res = requests.get(url, headers=headers, timeout=20)
+
+        try:
+            result = res.json()
+        except Exception:
+            return {"ok": False, "error": res.text}
+
+        if res.status_code >= 400:
+            return {"ok": False, "status_code": res.status_code, "result": result}
+
+        all_orders.extend(result.get("data", []) or [])
+
+        next_token = result.get("nextToken")
+
+        if not next_token:
+            break
+
+    return {"ok": True, "orders": all_orders}
+
+
+def summarize_orders_by_product(orders):
+    product_map = {}
+
+    for order in orders:
+        items = order.get("orderItems") or []
+
+        for item in items:
+            product_name = (
+                item.get("sellerProductName")
+                or item.get("productName")
+                or item.get("vendorItemName")
+                or "상품명 없음"
+            )
+
+            qty = int(item.get("salesQuantity") or 0)
+
+            unit_price = int(float(
+                item.get("unitSalesPrice")
+                or item.get("salesPrice")
+                or 0
+            ))
+
+            sales_amount = qty * unit_price
+
+            if product_name not in product_map:
+                product_map[product_name] = {
+                    "productName": product_name,
+                    "quantity": 0,
+                    "salesAmount": 0
+                }
+
+            product_map[product_name]["quantity"] += qty
+            product_map[product_name]["salesAmount"] += sales_amount
+
+    products = sorted(
+        product_map.values(),
+        key=lambda x: x["quantity"],
+        reverse=True
+    )
+
+    total_quantity = sum(p["quantity"] for p in products)
+    total_sales_amount = sum(p["salesAmount"] for p in products)
+
+    return {
+        "quantity": total_quantity,
+        "salesAmount": total_sales_amount,
+        "products": products
+    }
+
+
+@app.get("/api/coupang/sales-summary")
+def get_sales_summary():
+    today, month_start = get_kst_range()
+
+    today_result = fetch_rg_orders(today, today)
+
+    if not today_result.get("ok"):
+        return {
+            "success": False,
+            "scope": "today",
+            "error": today_result
+        }
+
+    month_result = fetch_rg_orders(month_start, today)
+
+    if not month_result.get("ok"):
+        return {
+            "success": False,
+            "scope": "month",
+            "error": month_result
+        }
+
+    return {
+        "success": True,
+        "todayDate": today,
+        "monthStart": month_start,
+        "today": summarize_orders_by_product(today_result["orders"]),
+        "month": summarize_orders_by_product(month_result["orders"])
     }
