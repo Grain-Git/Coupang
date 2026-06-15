@@ -411,3 +411,33 @@ def summarize_orders(orders):
         "salesAmount": total_sales_amount,
         "topProducts": top_products
     }
+
+@app.get("/api/coupang/sales-summary")
+def get_coupang_sales_summary():
+    today, month_start = get_kst_dates()
+
+    today_result = fetch_rg_orders(today, today)
+
+    if not today_result.get("ok"):
+        return {
+            "success": False,
+            "scope": "today",
+            "error": today_result
+        }
+
+    month_result = fetch_rg_orders(month_start, today)
+
+    if not month_result.get("ok"):
+        return {
+            "success": False,
+            "scope": "month",
+            "error": month_result
+        }
+
+    return {
+        "success": True,
+        "todayDate": today,
+        "monthStart": month_start,
+        "today": summarize_orders(today_result["orders"]),
+        "month": summarize_orders(month_result["orders"])
+    }
