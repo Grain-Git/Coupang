@@ -1,7 +1,3 @@
-import re
-import statistics
-from bs4 import BeautifulSoup
-
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 import os
@@ -10,6 +6,9 @@ import hmac
 import hashlib
 import requests
 import urllib.parse
+import re
+import statistics
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 
@@ -33,15 +32,14 @@ app.add_middleware(
 COUPANG_ACCESS_KEY = os.getenv("COUPANG_ACCESS_KEY")
 COUPANG_SECRET_KEY = os.getenv("COUPANG_SECRET_KEY")
 COUPANG_VENDOR_ID = os.getenv("COUPANG_VENDOR_ID")
+COUPANG_ORDER_STATUS = os.getenv("COUPANG_ORDER_STATUS", "ACCEPT")
 
 DOMAIN = "https://api-gateway.coupang.com"
 
 
 @app.get("/")
 def home():
-    return {
-        "status": "JRAIN Coupang API is running"
-    }
+    return {"status": "JRAIN Coupang API is running"}
 
 
 @app.get("/health")
@@ -49,21 +47,21 @@ def health():
     return {
         "access_key": bool(COUPANG_ACCESS_KEY),
         "secret_key": bool(COUPANG_SECRET_KEY),
-        "vendor_id": COUPANG_VENDOR_ID
+        "vendor_id": COUPANG_VENDOR_ID,
+        "order_status": COUPANG_ORDER_STATUS,
     }
 
 
 def make_auth(method: str, path: str, query: str = ""):
     if not COUPANG_ACCESS_KEY or not COUPANG_SECRET_KEY or not COUPANG_VENDOR_ID:
-        raise Exception("쿠팡 환경변수가 설정되지 않았습니다.")
+        raise Exception("Missing Coupang environment variables.")
 
     datetime_text = time.strftime("%y%m%dT%H%M%SZ", time.gmtime())
     message = datetime_text + method + path + query
-
     signature = hmac.new(
         COUPANG_SECRET_KEY.encode("utf-8"),
         message.encode("utf-8"),
-        hashlib.sha256
+        hashlib.sha256,
     ).hexdigest()
 
     return (
@@ -79,10 +77,27 @@ def safe_json_response(res):
         return res.json()
     except Exception:
         return {
-            "error": "JSON 변환 실패",
+            "error": "JSON parse failed",
             "status_code": res.status_code,
-            "text": res.text
+            "text": res.text,
         }
+
+
+def is_coupang_success(result):
+    """Accept Coupang success formats: SUCCESS, OK, 200, or empty successful data."""
+    if not isinstance(result, dict):
+        return True
+
+    code = result.get("code")
+    message = str(result.get("message") or "").upper()
+
+    if code in [None, "SUCCESS", 200, "200"]:
+        return True
+
+    if message in ["OK", "SUCCESS"]:
+        return True
+
+    return False
 
 
 @app.get("/api/coupang/products")
@@ -90,33 +105,34 @@ def get_products():
     method = "GET"
     path = "/v2/providers/seller_api/apis/api/v1/marketplace/seller-products"
     query = f"vendorId={COUPANG_VENDOR_ID}&nextToken=&maxPerPage=100"
-
     url = f"{DOMAIN}{path}?{query}"
-
     headers = {
         "Authorization": make_auth(method, path, query),
-        "Content-Type": "application/json;charset=UTF-8"
+        "Content-Type": "application/json;charset=UTF-8",
     }
 
     res = requests.get(url, headers=headers, timeout=20)
     result = safe_json_response(res)
 
-    if isinstance(result, dict) and result.get("code") != "SUCCESS":
+    if res.status_code >= 400 or not is_coupang_success(result):
         return {
-            "error": "쿠팡 API 실패",
+            "success": False,
+            "error": "Coupang product API failed",
             "status_code": res.status_code,
-            "result": result
+            "result": result,
         }
 
     raw_data = result.get("data", []) if isinstance(result, dict) else []
-
     products = []
 
-    for p in raw_data:
+    for p in raw_data or []:
         products.append({
             "id": p.get("sellerProductId"),
+            "sellerProductId": p.get("sellerProductId"),
             "name": p.get("sellerProductName"),
-            "status": p.get("statusName")
+            "sellerProductName": p.get("sellerProductName"),
+            "status": p.get("statusName"),
+            "statusName": p.get("statusName"),
         })
 
     return products
@@ -127,16 +143,12 @@ def get_product_raw(seller_product_id: int):
     method = "GET"
     path = f"/v2/providers/seller_api/apis/api/v1/marketplace/seller-products/{seller_product_id}"
     query = ""
-
     url = f"{DOMAIN}{path}"
-
     headers = {
         "Authorization": make_auth(method, path, query),
-        "Content-Type": "application/json;charset=UTF-8"
+        "Content-Type": "application/json;charset=UTF-8",
     }
-
     res = requests.get(url, headers=headers, timeout=20)
-
     return safe_json_response(res)
 
 
@@ -145,20 +157,17 @@ def get_product_detail(seller_product_id: int):
     method = "GET"
     path = f"/v2/providers/seller_api/apis/api/v1/marketplace/seller-products/{seller_product_id}"
     query = ""
-
     url = f"{DOMAIN}{path}"
-
     headers = {
         "Authorization": make_auth(method, path, query),
-        "Content-Type": "application/json;charset=UTF-8"
+        "Content-Type": "application/json;charset=UTF-8",
     }
-
     res = requests.get(url, headers=headers, timeout=20)
     result = safe_json_response(res)
 
     return {
         "status_code": res.status_code,
-        "data": result
+        "data": result,
     }
 
 
@@ -166,12 +175,12 @@ def get_kst_range():
     kst = timezone(timedelta(hours=9))
     now = datetime.now(kst)
 
-    today = now.strftime("%Y%m%d")
-    month_start = now.replace(day=1).strftime("%Y%m%d")
-
-    return today, month_start
-
-
+    return {
+        "today": now.strftime("%Y%m%d"),
+        "month_start": now.replace(day=1).strftime("%Y%m%d"),
+        "hyphen_today": now.strftime("%Y-%m-%d"),
+        "hyphen_month_start": now.replace(day=1).strftime("%Y-%m-%d"),
+    }
 
 
 def normalize_order_item(item):
@@ -254,7 +263,7 @@ def summarize_orders_by_product(orders):
                 product_map[product_name] = {
                     "productName": product_name,
                     "quantity": 0,
-                    "salesAmount": 0
+                    "salesAmount": 0,
                 }
 
             product_map[product_name]["quantity"] += qty
@@ -263,30 +272,14 @@ def summarize_orders_by_product(orders):
     products = sorted(
         product_map.values(),
         key=lambda x: x["quantity"],
-        reverse=True
+        reverse=True,
     )
 
     return {
         "orderCount": len(order_ids),
         "quantity": sum(p["quantity"] for p in products),
         "salesAmount": sum(p["salesAmount"] for p in products),
-        "products": products
-    }
-
-
-def get_kst_range():
-    kst = timezone(timedelta(hours=9))
-    now = datetime.now(kst)
-    today = now.strftime("%Y%m%d")
-    month_start = now.replace(day=1).strftime("%Y%m%d")
-    hyphen_today = now.strftime("%Y-%m-%d")
-    hyphen_month_start = now.replace(day=1).strftime("%Y-%m-%d")
-
-    return {
-        "today": today,
-        "month_start": month_start,
-        "hyphen_today": hyphen_today,
-        "hyphen_month_start": hyphen_month_start
+        "products": products,
     }
 
 
@@ -304,26 +297,18 @@ def fetch_rg_orders(paid_date_from: str, paid_date_to: str):
         url = f"{DOMAIN}{path}?{query}"
         headers = {
             "Authorization": make_auth(method, path, query),
-            "Content-Type": "application/json;charset=UTF-8"
+            "Content-Type": "application/json;charset=UTF-8",
         }
 
         res = requests.get(url, headers=headers, timeout=20)
         result = safe_json_response(res)
 
-        if res.status_code >= 400:
+        if res.status_code >= 400 or not is_coupang_success(result):
             return {
                 "ok": False,
                 "source": "rocket_growth",
                 "status_code": res.status_code,
-                "result": result
-            }
-
-        if isinstance(result, dict) and result.get("code") not in [None, "SUCCESS"]:
-            return {
-                "ok": False,
-                "source": "rocket_growth",
-                "status_code": res.status_code,
-                "result": result
+                "result": result,
             }
 
         orders = result.get("data", []) if isinstance(result, dict) else []
@@ -336,7 +321,7 @@ def fetch_rg_orders(paid_date_from: str, paid_date_to: str):
     return {
         "ok": True,
         "source": "rocket_growth",
-        "orders": all_orders
+        "orders": all_orders,
     }
 
 
@@ -350,8 +335,8 @@ def fetch_ordersheets(created_at_from: str, created_at_to: str):
         query_parts = {
             "createdAtFrom": created_at_from,
             "createdAtTo": created_at_to,
-            "status": os.getenv("COUPANG_ORDER_STATUS", "ACCEPT"),
-            "maxPerPage": "50"
+            "status": COUPANG_ORDER_STATUS,
+            "maxPerPage": "50",
         }
         if next_token:
             query_parts["nextToken"] = next_token
@@ -360,37 +345,39 @@ def fetch_ordersheets(created_at_from: str, created_at_to: str):
         url = f"{DOMAIN}{path}?{query}"
         headers = {
             "Authorization": make_auth(method, path, query),
-            "Content-Type": "application/json;charset=UTF-8"
+            "Content-Type": "application/json;charset=UTF-8",
         }
 
         res = requests.get(url, headers=headers, timeout=20)
         result = safe_json_response(res)
 
-        if res.status_code >= 400:
+        if res.status_code >= 400 or not is_coupang_success(result):
             return {
                 "ok": False,
                 "source": "ordersheets",
                 "status_code": res.status_code,
-                "result": result
-            }
-
-        if isinstance(result, dict) and result.get("code") not in [None, "SUCCESS"]:
-            return {
-                "ok": False,
-                "source": "ordersheets",
-                "status_code": res.status_code,
-                "result": result
+                "result": result,
             }
 
         orders = []
         if isinstance(result, dict):
-            orders = result.get("data", []) or result.get("content", []) or []
+            data = result.get("data")
+            if isinstance(data, list):
+                orders = data
+            elif isinstance(data, dict):
+                orders = data.get("data", []) or data.get("content", []) or []
+            else:
+                orders = result.get("content", []) or []
 
-        all_orders.extend(orders)
+        all_orders.extend(orders or [])
 
-        next_token = None
+        next_token = ""
         if isinstance(result, dict):
-            next_token = result.get("nextToken") or result.get("data", {}).get("nextToken") if isinstance(result.get("data"), dict) else None
+            data = result.get("data")
+            if isinstance(data, dict):
+                next_token = data.get("nextToken") or ""
+            else:
+                next_token = result.get("nextToken") or ""
 
         if not next_token:
             break
@@ -398,7 +385,7 @@ def fetch_ordersheets(created_at_from: str, created_at_to: str):
     return {
         "ok": True,
         "source": "ordersheets",
-        "orders": all_orders
+        "orders": all_orders,
     }
 
 
@@ -417,7 +404,7 @@ def fetch_best_available_orders(range_info, scope):
             "ok": False,
             "scope": scope,
             "rocketGrowthError": rg_result,
-            "ordersheetsError": order_result
+            "ordersheetsError": order_result,
         }
 
     rg_result = fetch_rg_orders(range_info["month_start"], range_info["today"])
@@ -433,7 +420,7 @@ def fetch_best_available_orders(range_info, scope):
         "ok": False,
         "scope": scope,
         "rocketGrowthError": rg_result,
-        "ordersheetsError": order_result
+        "ordersheetsError": order_result,
     }
 
 
@@ -446,7 +433,7 @@ def get_sales_summary():
         return {
             "success": False,
             "scope": "today",
-            "error": today_result
+            "error": today_result,
         }
 
     month_result = fetch_best_available_orders(range_info, "month")
@@ -454,7 +441,7 @@ def get_sales_summary():
         return {
             "success": False,
             "scope": "month",
-            "error": month_result
+            "error": month_result,
         }
 
     return {
@@ -464,21 +451,105 @@ def get_sales_summary():
         "todaySource": today_result.get("source"),
         "monthSource": month_result.get("source"),
         "today": summarize_orders_by_product(today_result["orders"]),
-        "month": summarize_orders_by_product(month_result["orders"])
+        "month": summarize_orders_by_product(month_result["orders"]),
     }
 
+
+def parse_int_text(value):
+    if value is None:
+        return 0
+    found = re.findall(r"\d[\d,]*", str(value))
+    if not found:
+        return 0
+    return int(found[0].replace(",", ""))
+
+
+def parse_price_text(value):
+    if value is None:
+        return 0
+    found = re.findall(r"\d[\d,]*", str(value))
+    if not found:
+        return 0
+    return int(found[-1].replace(",", ""))
+
+
+def product_text_has_rocket(text):
+    text = text or ""
+    rocket_terms = [
+        "로켓배송",
+        "로켓와우",
+        "로켓직구",
+        "판매자로켓",
+        "Rocket",
+    ]
+    return any(term in text for term in rocket_terms)
+
+
+def extract_coupang_search_products(html_text, limit=36):
+    soup = BeautifulSoup(html_text, "html.parser")
+    cards = soup.select("li.search-product")
+
+    if not cards:
+        cards = soup.select("[class*='search-product']")
+
+    products = []
+
+    for index, card in enumerate(cards[:limit], start=1):
+        text = card.get_text(" ", strip=True)
+        name_el = (
+            card.select_one(".name")
+            or card.select_one(".descriptions-inner")
+            or card.select_one("[class*='name']")
+        )
+        price_el = (
+            card.select_one(".price-value")
+            or card.select_one("strong.price-value")
+            or card.select_one("[class*='price']")
+        )
+        review_el = (
+            card.select_one(".rating-total-count")
+            or card.select_one("[class*='rating-total-count']")
+            or card.select_one("[class*='review']")
+        )
+        link_el = card.select_one("a[href]")
+        href = link_el.get("href") if link_el else ""
+
+        if href and href.startswith("/"):
+            href = "https://www.coupang.com" + href
+
+        product_id = ""
+        if href:
+            match = re.search(r"/vp/products/(\d+)", href)
+            if match:
+                product_id = match.group(1)
+
+        product_name = name_el.get_text(" ", strip=True) if name_el else text[:80]
+        price = parse_price_text(price_el.get_text(" ", strip=True) if price_el else text)
+        reviews = parse_int_text(review_el.get_text(" ", strip=True) if review_el else "")
+        is_rocket = product_text_has_rocket(text)
+        is_ad = "광고" in text[:30] or "AD" in text[:30].upper()
+
+        if not product_name:
+            continue
+
+        products.append({
+            "rank": index,
+            "productId": product_id,
+            "productName": product_name,
+            "price": price,
+            "reviewCount": reviews,
+            "isRocket": is_rocket,
+            "isAd": is_ad,
+            "url": href,
+        })
+
+    return products
 
 
 @app.get("/api/coupang/search-analysis")
 def search_analysis(keyword: str = Query(..., min_length=1), limit: int = Query(36, ge=1, le=72)):
-    """Analyze public Coupang search results for sourcing competition signals.
-
-    Frontend usage:
-    /api/coupang/search-analysis?keyword=결로방지
-    """
     encoded_keyword = urllib.parse.quote(keyword)
     url = f"https://www.coupang.com/np/search?q={encoded_keyword}&channel=user"
-
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -487,7 +558,7 @@ def search_analysis(keyword: str = Query(..., min_length=1), limit: int = Query(
         ),
         "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Referer": "https://www.coupang.com/"
+        "Referer": "https://www.coupang.com/",
     }
 
     try:
@@ -495,15 +566,15 @@ def search_analysis(keyword: str = Query(..., min_length=1), limit: int = Query(
     except Exception as e:
         return {
             "success": False,
-            "message": "쿠팡 검색 요청 실패",
-            "detail": str(e)
+            "message": "Coupang search request failed.",
+            "detail": str(e),
         }
 
     if res.status_code >= 400:
         return {
             "success": False,
-            "message": "쿠팡 검색 페이지 응답 실패",
-            "status_code": res.status_code
+            "message": "Coupang search page request failed.",
+            "status_code": res.status_code,
         }
 
     products = extract_coupang_search_products(res.text, limit=limit)
@@ -511,14 +582,14 @@ def search_analysis(keyword: str = Query(..., min_length=1), limit: int = Query(
     if not products:
         return {
             "success": False,
-            "message": "쿠팡 검색 결과를 파싱하지 못했습니다. 차단/HTML 변경 가능성이 있습니다.",
+            "message": "Could not parse Coupang search results.",
             "keyword": keyword,
             "competitorCount": 0,
             "avgReviews": 0,
             "topReviews": 0,
             "rocketRatio": 0,
             "avgPrice": 0,
-            "products": []
+            "products": [],
         }
 
     review_values = [p["reviewCount"] for p in products if p["reviewCount"] > 0]
@@ -535,5 +606,5 @@ def search_analysis(keyword: str = Query(..., min_length=1), limit: int = Query(
         "topReviews": max(review_values) if review_values else 0,
         "rocketRatio": round((rocket_count / len(products)) * 100, 1) if products else 0,
         "avgPrice": round(statistics.mean(price_values)) if price_values else 0,
-        "products": products[:20]
+        "products": products[:20],
     }
