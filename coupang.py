@@ -242,18 +242,77 @@ def get_order_items(order):
     return []
 
 
+def get_order_key(order):
+    return (
+        order.get("orderId")
+        or order.get("orderNo")
+        or order.get("orderSheetId")
+        or order.get("shipmentBoxId")
+        or order.get("orderSheetNo")
+        or order.get("receiptId")
+        or str(order)[:120]
+    )
+
+
+def merge_order_results(*results):
+    merged = []
+    seen = set()
+    sources = []
+    errors = []
+
+    for result in results:
+        if not result:
+            continue
+
+        source = result.get("source", "unknown")
+        if result.get("ok"):
+            orders = result.get("orders") or []
+            sources.append({
+                "source": source,
+                "count": len(orders),
+            })
+            for order in orders:
+                key = get_order_key(order)
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(order)
+        else:
+            errors.append(result)
+
+    if merged:
+        active_sources = [row["source"] for row in sources if row["count"] > 0]
+        return {
+            "ok": True,
+            "source": "+".join(active_sources) if active_sources else "combined",
+            "sources": sources,
+            "orders": merged,
+            "errors": errors,
+        }
+
+    for result in results:
+        if result and result.get("ok"):
+            return {
+                "ok": True,
+                "source": result.get("source", "empty"),
+                "sources": sources,
+                "orders": [],
+                "errors": errors,
+            }
+
+    return {
+        "ok": False,
+        "sources": sources,
+        "errors": errors,
+    }
+
+
 def summarize_orders_by_product(orders):
     product_map = {}
     order_ids = set()
 
     for order in orders:
-        order_id = (
-            order.get("orderId")
-            or order.get("orderNo")
-            or order.get("orderSheetId")
-            or order.get("shipmentBoxId")
-            or str(order)[:80]
-        )
+        order_id = get_order_key(order)
         order_ids.add(order_id)
 
         for item in get_order_items(order):
@@ -392,13 +451,10 @@ def fetch_ordersheets(created_at_from: str, created_at_to: str):
 def fetch_best_available_orders(range_info, scope):
     if scope == "today":
         rg_result = fetch_rg_orders(range_info["today"], range_info["today"])
-        if rg_result.get("ok"):
-            return rg_result
-
         order_result = fetch_ordersheets(range_info["hyphen_today"], range_info["hyphen_today"])
-        if order_result.get("ok"):
-            order_result["fallbackFrom"] = rg_result
-            return order_result
+        merged = merge_order_results(rg_result, order_result)
+        if merged.get("ok"):
+            return merged
 
         return {
             "ok": False,
@@ -408,13 +464,10 @@ def fetch_best_available_orders(range_info, scope):
         }
 
     rg_result = fetch_rg_orders(range_info["month_start"], range_info["today"])
-    if rg_result.get("ok"):
-        return rg_result
-
     order_result = fetch_ordersheets(range_info["hyphen_month_start"], range_info["hyphen_today"])
-    if order_result.get("ok"):
-        order_result["fallbackFrom"] = rg_result
-        return order_result
+    merged = merge_order_results(rg_result, order_result)
+    if merged.get("ok"):
+        return merged
 
     return {
         "ok": False,
@@ -450,6 +503,8 @@ def get_sales_summary():
         "monthStart": range_info["month_start"],
         "todaySource": today_result.get("source"),
         "monthSource": month_result.get("source"),
+        "todaySources": today_result.get("sources", []),
+        "monthSources": month_result.get("sources", []),
         "today": summarize_orders_by_product(today_result["orders"]),
         "month": summarize_orders_by_product(month_result["orders"]),
     }
@@ -505,6 +560,7 @@ def get_sales_range(
         "from": hyphen_from,
         "to": hyphen_to,
         "source": result.get("source"),
+        "sources": result.get("sources", []),
         "summary": summarize_orders_by_product(result["orders"]),
     }
 
