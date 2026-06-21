@@ -1,3 +1,7 @@
+import re
+import statistics
+from bs4 import BeautifulSoup
+
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 import os
@@ -313,4 +317,172 @@ def get_sales_summary():
         "monthStart": month_start,
         "today": summarize_orders_by_product(today_result["orders"]),
         "month": summarize_orders_by_product(month_result["orders"])
+    }
+
+
+def parse_int_text(value):
+    """Convert strings like '1,234', '리뷰 2,001개', or '(98)' into an int."""
+    if value is None:
+        return 0
+    found = re.findall(r"\d[\d,]*", str(value))
+    if not found:
+        return 0
+    return int(found[0].replace(",", ""))
+
+
+def parse_price_text(value):
+    """Convert Coupang price text into an int KRW value."""
+    if value is None:
+        return 0
+    found = re.findall(r"\d[\d,]*", str(value))
+    if not found:
+        return 0
+    return int(found[-1].replace(",", ""))
+
+
+def product_text_has_rocket(text):
+    text = text or ""
+    rocket_terms = [
+        "로켓배송",
+        "로켓와우",
+        "로켓직구",
+        "판매자로켓",
+        "Rocket"
+    ]
+    return any(term in text for term in rocket_terms)
+
+
+def extract_coupang_search_products(html_text, limit=36):
+    """Parse public Coupang search HTML into product cards.
+
+    This does not bypass login, CAPTCHA, or access controls. If Coupang returns
+    a block/interstitial page, the product list will simply be empty.
+    """
+    soup = BeautifulSoup(html_text, "html.parser")
+    cards = soup.select("li.search-product")
+
+    if not cards:
+        cards = soup.select("[class*='search-product']")
+
+    products = []
+
+    for index, card in enumerate(cards[:limit], start=1):
+        text = card.get_text(" ", strip=True)
+        name_el = (
+            card.select_one(".name")
+            or card.select_one(".descriptions-inner")
+            or card.select_one("[class*='name']")
+        )
+        price_el = (
+            card.select_one(".price-value")
+            or card.select_one("strong.price-value")
+            or card.select_one("[class*='price']")
+        )
+        review_el = (
+            card.select_one(".rating-total-count")
+            or card.select_one("[class*='rating-total-count']")
+            or card.select_one("[class*='review']")
+        )
+        link_el = card.select_one("a[href]")
+        href = link_el.get("href") if link_el else ""
+
+        if href and href.startswith("/"):
+            href = "https://www.coupang.com" + href
+
+        product_id = ""
+        if href:
+            match = re.search(r"/vp/products/(\d+)", href)
+            if match:
+                product_id = match.group(1)
+
+        product_name = name_el.get_text(" ", strip=True) if name_el else text[:80]
+        price = parse_price_text(price_el.get_text(" ", strip=True) if price_el else text)
+        reviews = parse_int_text(review_el.get_text(" ", strip=True) if review_el else "")
+        is_rocket = product_text_has_rocket(text)
+        is_ad = "광고" in text[:30] or "AD" in text[:30].upper()
+
+        if not product_name:
+            continue
+
+        products.append({
+            "rank": index,
+            "productId": product_id,
+            "productName": product_name,
+            "price": price,
+            "reviewCount": reviews,
+            "isRocket": is_rocket,
+            "isAd": is_ad,
+            "url": href
+        })
+
+    return products
+
+
+@app.get("/api/coupang/search-analysis")
+def search_analysis(keyword: str = Query(..., min_length=1), limit: int = Query(36, ge=1, le=72)):
+    """Analyze public Coupang search results for sourcing competition signals.
+
+    Frontend usage:
+    /api/coupang/search-analysis?keyword=결로방지
+    """
+    encoded_keyword = urllib.parse.quote(keyword)
+    url = f"https://www.coupang.com/np/search?q={encoded_keyword}&channel=user"
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/125.0 Safari/537.36"
+        ),
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Referer": "https://www.coupang.com/"
+    }
+
+    try:
+        res = requests.get(url, headers=headers, timeout=20)
+    except Exception as e:
+        return {
+            "success": False,
+            "message": "쿠팡 검색 요청 실패",
+            "detail": str(e)
+        }
+
+    if res.status_code >= 400:
+        return {
+            "success": False,
+            "message": "쿠팡 검색 페이지 응답 실패",
+            "status_code": res.status_code
+        }
+
+    products = extract_coupang_search_products(res.text, limit=limit)
+
+    if not products:
+        return {
+            "success": False,
+            "message": "쿠팡 검색 결과를 파싱하지 못했습니다. 차단/HTML 변경 가능성이 있습니다.",
+            "keyword": keyword,
+            "competitorCount": 0,
+            "avgReviews": 0,
+            "topReviews": 0,
+            "rocketRatio": 0,
+            "avgPrice": 0,
+            "products": []
+        }
+
+    review_values = [p["reviewCount"] for p in products if p["reviewCount"] > 0]
+    price_values = [p["price"] for p in products if p["price"] > 0]
+    rocket_count = sum(1 for p in products if p["isRocket"])
+
+    return {
+        "success": True,
+        "keyword": keyword,
+        "source": "coupang_public_search",
+        "checkedAt": datetime.now(timezone(timedelta(hours=9))).isoformat(),
+        "competitorCount": len(products),
+        "avgReviews": round(statistics.mean(review_values)) if review_values else 0,
+        "topReviews": max(review_values) if review_values else 0,
+        "rocketRatio": round((rocket_count / len(products)) * 100, 1) if products else 0,
+        "avgPrice": round(statistics.mean(price_values)) if price_values else 0,
+        "products": products[:20]
     }
