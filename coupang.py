@@ -455,6 +455,60 @@ def get_sales_summary():
     }
 
 
+def normalize_date_param(value):
+    """Accept YYYY-MM-DD or YYYYMMDD and return both formats."""
+    text = str(value or "").strip()
+    if re.fullmatch(r"\d{8}", text):
+        return text, f"{text[0:4]}-{text[4:6]}-{text[6:8]}"
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return text.replace("-", ""), text
+    raise ValueError("Date must be YYYY-MM-DD or YYYYMMDD.")
+
+
+@app.get("/api/coupang/sales-range")
+def get_sales_range(
+    from_date: str = Query(None, alias="from"),
+    to_date: str = Query(None, alias="to"),
+):
+    kst = timezone(timedelta(hours=9))
+    today = datetime.now(kst)
+    default_from = today.replace(day=1).strftime("%Y-%m-%d")
+    default_to = today.strftime("%Y-%m-%d")
+
+    try:
+        compact_from, hyphen_from = normalize_date_param(from_date or default_from)
+        compact_to, hyphen_to = normalize_date_param(to_date or default_to)
+    except ValueError as e:
+        return {
+            "success": False,
+            "message": str(e),
+        }
+
+    range_info = {
+        "today": compact_to,
+        "month_start": compact_from,
+        "hyphen_today": hyphen_to,
+        "hyphen_month_start": hyphen_from,
+    }
+
+    result = fetch_best_available_orders(range_info, "month")
+    if not result.get("ok"):
+        return {
+            "success": False,
+            "from": hyphen_from,
+            "to": hyphen_to,
+            "error": result,
+        }
+
+    return {
+        "success": True,
+        "from": hyphen_from,
+        "to": hyphen_to,
+        "source": result.get("source"),
+        "summary": summarize_orders_by_product(result["orders"]),
+    }
+
+
 def parse_int_text(value):
     if value is None:
         return 0
