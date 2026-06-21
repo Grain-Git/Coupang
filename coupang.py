@@ -172,98 +172,83 @@ def get_kst_range():
     return today, month_start
 
 
-def fetch_rg_orders(paid_date_from: str, paid_date_to: str):
-    method = "GET"
-    path = f"/v2/providers/rg_open_api/apis/api/v1/vendors/{COUPANG_VENDOR_ID}/rg/orders"
 
-    all_orders = []
-    next_token = ""
 
-    while True:
-        query = f"paidDateFrom={paid_date_from}&paidDateTo={paid_date_to}"
+def normalize_order_item(item):
+    product_name = (
+        item.get("sellerProductName")
+        or item.get("productName")
+        or item.get("vendorItemName")
+        or item.get("sellerProductItemName")
+        or item.get("itemName")
+        or item.get("productTitle")
+        or "상품명 없음"
+    )
 
-        if next_token:
-            query += f"&nextToken={next_token}"
+    try:
+        qty = int(
+            item.get("salesQuantity")
+            or item.get("shippingCount")
+            or item.get("quantity")
+            or item.get("orderCount")
+            or item.get("count")
+            or 0
+        )
+    except Exception:
+        qty = 0
 
-        url = f"{DOMAIN}{path}?{query}"
+    try:
+        unit_price = int(float(
+            item.get("unitSalesPrice")
+            or item.get("salesPrice")
+            or item.get("orderPrice")
+            or item.get("salePrice")
+            or item.get("price")
+            or 0
+        ))
+    except Exception:
+        unit_price = 0
 
-        headers = {
-            "Authorization": make_auth(method, path, query),
-            "Content-Type": "application/json;charset=UTF-8"
-        }
+    try:
+        total_price = int(float(
+            item.get("salesAmount")
+            or item.get("totalPrice")
+            or item.get("orderAmount")
+            or 0
+        ))
+    except Exception:
+        total_price = 0
 
-        res = requests.get(url, headers=headers, timeout=20)
-        result = safe_json_response(res)
+    if total_price <= 0:
+        total_price = qty * unit_price
 
-        if res.status_code >= 400:
-            return {
-                "ok": False,
-                "status_code": res.status_code,
-                "result": result
-            }
+    return product_name, qty, total_price
 
-        if isinstance(result, dict) and result.get("code") not in [None, "SUCCESS"]:
-            return {
-                "ok": False,
-                "status_code": res.status_code,
-                "result": result
-            }
 
-        orders = []
-
-        if isinstance(result, dict):
-            orders = result.get("data", []) or []
-
-        all_orders.extend(orders)
-
-        next_token = result.get("nextToken") if isinstance(result, dict) else None
-
-        if not next_token:
-            break
-
-    return {
-        "ok": True,
-        "orders": all_orders
-    }
+def get_order_items(order):
+    for key in ["orderItems", "items", "itemList", "orderItemList", "orderSheetItems"]:
+        value = order.get(key)
+        if isinstance(value, list):
+            return value
+    return []
 
 
 def summarize_orders_by_product(orders):
     product_map = {}
+    order_ids = set()
 
     for order in orders:
-        items = (
-            order.get("orderItems")
-            or order.get("items")
-            or []
+        order_id = (
+            order.get("orderId")
+            or order.get("orderNo")
+            or order.get("orderSheetId")
+            or order.get("shipmentBoxId")
+            or str(order)[:80]
         )
+        order_ids.add(order_id)
 
-        for item in items:
-            product_name = (
-                item.get("sellerProductName")
-                or item.get("productName")
-                or item.get("vendorItemName")
-                or item.get("sellerProductItemName")
-                or item.get("itemName")
-                or "상품명 없음"
-            )
-
-            try:
-                qty = int(item.get("salesQuantity") or item.get("quantity") or 0)
-            except Exception:
-                qty = 0
-
-            try:
-                unit_price = int(float(
-                    item.get("unitSalesPrice")
-                    or item.get("salesPrice")
-                    or item.get("orderPrice")
-                    or item.get("price")
-                    or 0
-                ))
-            except Exception:
-                unit_price = 0
-
-            sales_amount = qty * unit_price
+        for item in get_order_items(order):
+            product_name, qty, sales_amount = normalize_order_item(item)
 
             if product_name not in product_map:
                 product_map[product_name] = {
@@ -282,19 +267,181 @@ def summarize_orders_by_product(orders):
     )
 
     return {
-        "orderCount": len(orders),
+        "orderCount": len(order_ids),
         "quantity": sum(p["quantity"] for p in products),
         "salesAmount": sum(p["salesAmount"] for p in products),
         "products": products
     }
 
 
+def get_kst_range():
+    kst = timezone(timedelta(hours=9))
+    now = datetime.now(kst)
+    today = now.strftime("%Y%m%d")
+    month_start = now.replace(day=1).strftime("%Y%m%d")
+    hyphen_today = now.strftime("%Y-%m-%d")
+    hyphen_month_start = now.replace(day=1).strftime("%Y-%m-%d")
+
+    return {
+        "today": today,
+        "month_start": month_start,
+        "hyphen_today": hyphen_today,
+        "hyphen_month_start": hyphen_month_start
+    }
+
+
+def fetch_rg_orders(paid_date_from: str, paid_date_to: str):
+    method = "GET"
+    path = f"/v2/providers/rg_open_api/apis/api/v1/vendors/{COUPANG_VENDOR_ID}/rg/orders"
+    all_orders = []
+    next_token = ""
+
+    while True:
+        query = f"paidDateFrom={paid_date_from}&paidDateTo={paid_date_to}"
+        if next_token:
+            query += f"&nextToken={next_token}"
+
+        url = f"{DOMAIN}{path}?{query}"
+        headers = {
+            "Authorization": make_auth(method, path, query),
+            "Content-Type": "application/json;charset=UTF-8"
+        }
+
+        res = requests.get(url, headers=headers, timeout=20)
+        result = safe_json_response(res)
+
+        if res.status_code >= 400:
+            return {
+                "ok": False,
+                "source": "rocket_growth",
+                "status_code": res.status_code,
+                "result": result
+            }
+
+        if isinstance(result, dict) and result.get("code") not in [None, "SUCCESS"]:
+            return {
+                "ok": False,
+                "source": "rocket_growth",
+                "status_code": res.status_code,
+                "result": result
+            }
+
+        orders = result.get("data", []) if isinstance(result, dict) else []
+        all_orders.extend(orders or [])
+
+        next_token = result.get("nextToken") if isinstance(result, dict) else None
+        if not next_token:
+            break
+
+    return {
+        "ok": True,
+        "source": "rocket_growth",
+        "orders": all_orders
+    }
+
+
+def fetch_ordersheets(created_at_from: str, created_at_to: str):
+    method = "GET"
+    path = f"/v2/providers/openapi/apis/api/v4/vendors/{COUPANG_VENDOR_ID}/ordersheets"
+    all_orders = []
+    next_token = ""
+
+    while True:
+        query_parts = {
+            "createdAtFrom": created_at_from,
+            "createdAtTo": created_at_to,
+            "status": os.getenv("COUPANG_ORDER_STATUS", "ACCEPT"),
+            "maxPerPage": "50"
+        }
+        if next_token:
+            query_parts["nextToken"] = next_token
+
+        query = urllib.parse.urlencode(query_parts)
+        url = f"{DOMAIN}{path}?{query}"
+        headers = {
+            "Authorization": make_auth(method, path, query),
+            "Content-Type": "application/json;charset=UTF-8"
+        }
+
+        res = requests.get(url, headers=headers, timeout=20)
+        result = safe_json_response(res)
+
+        if res.status_code >= 400:
+            return {
+                "ok": False,
+                "source": "ordersheets",
+                "status_code": res.status_code,
+                "result": result
+            }
+
+        if isinstance(result, dict) and result.get("code") not in [None, "SUCCESS"]:
+            return {
+                "ok": False,
+                "source": "ordersheets",
+                "status_code": res.status_code,
+                "result": result
+            }
+
+        orders = []
+        if isinstance(result, dict):
+            orders = result.get("data", []) or result.get("content", []) or []
+
+        all_orders.extend(orders)
+
+        next_token = None
+        if isinstance(result, dict):
+            next_token = result.get("nextToken") or result.get("data", {}).get("nextToken") if isinstance(result.get("data"), dict) else None
+
+        if not next_token:
+            break
+
+    return {
+        "ok": True,
+        "source": "ordersheets",
+        "orders": all_orders
+    }
+
+
+def fetch_best_available_orders(range_info, scope):
+    if scope == "today":
+        rg_result = fetch_rg_orders(range_info["today"], range_info["today"])
+        if rg_result.get("ok"):
+            return rg_result
+
+        order_result = fetch_ordersheets(range_info["hyphen_today"], range_info["hyphen_today"])
+        if order_result.get("ok"):
+            order_result["fallbackFrom"] = rg_result
+            return order_result
+
+        return {
+            "ok": False,
+            "scope": scope,
+            "rocketGrowthError": rg_result,
+            "ordersheetsError": order_result
+        }
+
+    rg_result = fetch_rg_orders(range_info["month_start"], range_info["today"])
+    if rg_result.get("ok"):
+        return rg_result
+
+    order_result = fetch_ordersheets(range_info["hyphen_month_start"], range_info["hyphen_today"])
+    if order_result.get("ok"):
+        order_result["fallbackFrom"] = rg_result
+        return order_result
+
+    return {
+        "ok": False,
+        "scope": scope,
+        "rocketGrowthError": rg_result,
+        "ordersheetsError": order_result
+    }
+
+
 @app.get("/api/coupang/sales-summary")
 def get_sales_summary():
-    today, month_start = get_kst_range()
+    range_info = get_kst_range()
 
-    today_result = fetch_rg_orders(today, today)
-
+    today_result = fetch_best_available_orders(range_info, "today")
     if not today_result.get("ok"):
         return {
             "success": False,
@@ -302,8 +449,7 @@ def get_sales_summary():
             "error": today_result
         }
 
-    month_result = fetch_rg_orders(month_start, today)
-
+    month_result = fetch_best_available_orders(range_info, "month")
     if not month_result.get("ok"):
         return {
             "success": False,
@@ -313,109 +459,14 @@ def get_sales_summary():
 
     return {
         "success": True,
-        "todayDate": today,
-        "monthStart": month_start,
+        "todayDate": range_info["today"],
+        "monthStart": range_info["month_start"],
+        "todaySource": today_result.get("source"),
+        "monthSource": month_result.get("source"),
         "today": summarize_orders_by_product(today_result["orders"]),
         "month": summarize_orders_by_product(month_result["orders"])
     }
 
-
-def parse_int_text(value):
-    """Convert strings like '1,234', '리뷰 2,001개', or '(98)' into an int."""
-    if value is None:
-        return 0
-    found = re.findall(r"\d[\d,]*", str(value))
-    if not found:
-        return 0
-    return int(found[0].replace(",", ""))
-
-
-def parse_price_text(value):
-    """Convert Coupang price text into an int KRW value."""
-    if value is None:
-        return 0
-    found = re.findall(r"\d[\d,]*", str(value))
-    if not found:
-        return 0
-    return int(found[-1].replace(",", ""))
-
-
-def product_text_has_rocket(text):
-    text = text or ""
-    rocket_terms = [
-        "로켓배송",
-        "로켓와우",
-        "로켓직구",
-        "판매자로켓",
-        "Rocket"
-    ]
-    return any(term in text for term in rocket_terms)
-
-
-def extract_coupang_search_products(html_text, limit=36):
-    """Parse public Coupang search HTML into product cards.
-
-    This does not bypass login, CAPTCHA, or access controls. If Coupang returns
-    a block/interstitial page, the product list will simply be empty.
-    """
-    soup = BeautifulSoup(html_text, "html.parser")
-    cards = soup.select("li.search-product")
-
-    if not cards:
-        cards = soup.select("[class*='search-product']")
-
-    products = []
-
-    for index, card in enumerate(cards[:limit], start=1):
-        text = card.get_text(" ", strip=True)
-        name_el = (
-            card.select_one(".name")
-            or card.select_one(".descriptions-inner")
-            or card.select_one("[class*='name']")
-        )
-        price_el = (
-            card.select_one(".price-value")
-            or card.select_one("strong.price-value")
-            or card.select_one("[class*='price']")
-        )
-        review_el = (
-            card.select_one(".rating-total-count")
-            or card.select_one("[class*='rating-total-count']")
-            or card.select_one("[class*='review']")
-        )
-        link_el = card.select_one("a[href]")
-        href = link_el.get("href") if link_el else ""
-
-        if href and href.startswith("/"):
-            href = "https://www.coupang.com" + href
-
-        product_id = ""
-        if href:
-            match = re.search(r"/vp/products/(\d+)", href)
-            if match:
-                product_id = match.group(1)
-
-        product_name = name_el.get_text(" ", strip=True) if name_el else text[:80]
-        price = parse_price_text(price_el.get_text(" ", strip=True) if price_el else text)
-        reviews = parse_int_text(review_el.get_text(" ", strip=True) if review_el else "")
-        is_rocket = product_text_has_rocket(text)
-        is_ad = "광고" in text[:30] or "AD" in text[:30].upper()
-
-        if not product_name:
-            continue
-
-        products.append({
-            "rank": index,
-            "productId": product_id,
-            "productName": product_name,
-            "price": price,
-            "reviewCount": reviews,
-            "isRocket": is_rocket,
-            "isAd": is_ad,
-            "url": href
-        })
-
-    return products
 
 
 @app.get("/api/coupang/search-analysis")
